@@ -133,7 +133,30 @@ class PineconeService:
                 for j, chunk in enumerate(batch, 1):
                     try:
                         print(f"  チャンク {j}/{len(batch)} の埋め込みベクトルを生成中...")
-                        vector = self.get_embedding(chunk["text"])
+                        
+                        # テキスト内容と回答例を結合してベクトル化
+                        main_text = chunk["text"]
+                        answer_examples = chunk.get("metadata", {}).get("answer_examples", [])
+                        
+                        # 回答例をテキストに結合（検索時の優先度を向上）
+                        combined_text = main_text
+                        
+                        if answer_examples:
+                            # 回答例を文字列に変換（既に文字列の場合はそのまま使用）
+                            if isinstance(answer_examples[0], dict):
+                                # 辞書形式の場合は自然な形式に変換
+                                answers_text = "\n".join([
+                                    f"Q: {qa.get('question', '')}\nA: {qa.get('answer', '')}"
+                                    for qa in answer_examples
+                                ])
+                            else:
+                                # 文字列の場合はそのまま結合
+                                answers_text = "\n".join(answer_examples)
+                            
+                            # 回答例をメインテキストの前に配置（検索時の優先度を向上）
+                            combined_text = f"回答例:\n{answers_text}\n\n{combined_text}"
+                        
+                        vector = self.get_embedding(combined_text)
                         
                         # メタデータの設定（CSVファイルのメタデータを含める）
                         metadata = {
@@ -146,8 +169,7 @@ class PineconeService:
                             "created_date": chunk.get("metadata", {}).get("created_date", ""),
                             "upload_date": chunk.get("metadata", {}).get("upload_date", ""),
                             "source": chunk.get("metadata", {}).get("source", ""),
-                            "question_examples": chunk.get("metadata", {}).get("question_examples", []),
-                            "answer_examples": chunk.get("metadata", {}).get("answer_examples", []),
+                            "answer_examples": self._convert_answer_examples_to_strings(chunk.get("metadata", {}).get("answer_examples", [])),
                             "verified": chunk.get("metadata", {}).get("verified", False),
                             "timestamp_type": chunk.get("metadata", {}).get("timestamp_type", "static"),
                             "valid_for": chunk.get("metadata", {}).get("valid_for", []),
@@ -158,7 +180,9 @@ class PineconeService:
                             "facility_name": chunk.get("metadata", {}).get("facility_name", ""),
                             "walking_distance": chunk.get("metadata", {}).get("walking_distance", 0),
                             "walking_minutes": chunk.get("metadata", {}).get("walking_minutes", 0),
-                            "straight_distance": chunk.get("metadata", {}).get("straight_distance", 0)
+                            "straight_distance": chunk.get("metadata", {}).get("straight_distance", 0),
+                            # 検索用の結合テキストも保存
+                            "search_text": combined_text
                         }
                         
                         # デバッグ情報の表示
@@ -167,7 +191,6 @@ class PineconeService:
                         print(f"    - 中カテゴリ: {metadata['sub_category']}")
                         print(f"    - 市区町村: {metadata['city']}")
                         print(f"    - ソース: {metadata['source']}")
-                        print(f"    - 質問例: {metadata['question_examples']}")
                         print(f"    - 回答例: {metadata['answer_examples']}")
                         print(f"    - 検証済み: {metadata['verified']}")
                         print(f"    - 更新タイプ: {metadata['timestamp_type']}")
@@ -175,6 +198,13 @@ class PineconeService:
                         print(f"    - 緯度: {metadata['latitude']}")
                         print(f"    - 経度: {metadata['longitude']}")
                         print(f"    - 住所: {metadata['address']}")
+                        
+                        # ベクトル化に使用されたテキストの情報を表示
+                        print(f"  ベクトル化に使用されたテキスト:")
+                        print(f"    - 元のテキスト長: {len(main_text)}文字")
+                        print(f"    - 回答例数: {len(answer_examples)}個")
+                        print(f"    - 結合テキスト長: {len(combined_text)}文字")
+                        print(f"    - 結合テキスト（最初の200文字）: {combined_text[:200]}...")
                         
                         # デバッグ情報の表示
                         print(f"  メタデータ: {json.dumps(metadata, ensure_ascii=False)}")
@@ -437,4 +467,62 @@ class PineconeService:
             }
         except Exception as e:
             print(f"ベクトルの取得中にエラーが発生しました: {str(e)}")
-            return None 
+            return None
+
+    def _convert_answer_examples_to_strings(self, answer_examples: List[Dict]) -> List[str]:
+        """answer_examplesを文字列のリストに変換"""
+        if not answer_examples:
+            return []
+        
+        converted_examples = []
+        for example in answer_examples:
+            if isinstance(example, dict):
+                # 辞書の場合は "質問: 内容, 回答: 内容" の形式に変換
+                question = example.get('question', '')
+                answer = example.get('answer', '')
+                if question and answer:
+                    converted_examples.append(f"質問: {question}, 回答: {answer}")
+                elif question:
+                    converted_examples.append(f"質問: {question}")
+                elif answer:
+                    converted_examples.append(f"回答: {answer}")
+            else:
+                # 辞書以外の場合は文字列に変換
+                converted_examples.append(str(example))
+        
+        return converted_examples
+
+    def _convert_answer_examples_from_strings(self, answer_examples: List[str]) -> List[Dict]:
+        """文字列のリストからanswer_examplesを辞書のリストに変換"""
+        if not answer_examples:
+            return []
+        
+        converted_examples = []
+        for example in answer_examples:
+            if isinstance(example, str):
+                # "質問: 内容, 回答: 内容" の形式から辞書に変換
+                if "質問:" in example and "回答:" in example:
+                    try:
+                        # 質問と回答を抽出
+                        parts = example.split(", 回答: ")
+                        if len(parts) == 2:
+                            question_part = parts[0].replace("質問: ", "")
+                            answer_part = parts[1]
+                            converted_examples.append({
+                                "question": question_part,
+                                "answer": answer_part
+                            })
+                        else:
+                            # 形式が異なる場合はそのまま文字列として保存
+                            converted_examples.append({"question": "", "answer": example})
+                    except:
+                        # パースに失敗した場合はそのまま文字列として保存
+                        converted_examples.append({"question": "", "answer": example})
+                else:
+                    # 質問と回答の形式でない場合は回答として保存
+                    converted_examples.append({"question": "", "answer": example})
+            else:
+                # 文字列以外の場合はそのまま
+                converted_examples.append(example)
+        
+        return converted_examples 
